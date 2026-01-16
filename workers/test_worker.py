@@ -41,11 +41,14 @@ class TestWorker(BaseWorker):
         result = TestResult()
         outputs = []
 
-        # Use venv if available
+        # Use venv if available (check both Linux and Windows paths)
         venv_prefix = ""
-        venv_path = self.codebase_path / "venv" / "bin"
-        if venv_path.exists():
-            venv_prefix = f"{venv_path}/"
+        venv_linux = self.codebase_path / "venv" / "bin"
+        venv_windows = self.codebase_path / "venv" / "Scripts"
+        if venv_linux.exists():
+            venv_prefix = f"{venv_linux}/"
+        elif venv_windows.exists():
+            venv_prefix = f"{venv_windows}/"
 
         # Run pytest on core tests only (exclude Mastermind-generated tests)
         self.log("Running pytest on core tests...")
@@ -99,11 +102,14 @@ class TestWorker(BaseWorker):
         """Run specific test file or function."""
         self.log(f"Running tests: {test_path}")
 
-        # Use venv if available
+        # Use venv if available (check both Linux and Windows paths)
         venv_prefix = ""
-        venv_path = self.codebase_path / "venv" / "bin"
-        if venv_path.exists():
-            venv_prefix = f"{venv_path}/"
+        venv_linux = self.codebase_path / "venv" / "bin"
+        venv_windows = self.codebase_path / "venv" / "Scripts"
+        if venv_linux.exists():
+            venv_prefix = f"{venv_linux}/"
+        elif venv_windows.exists():
+            venv_prefix = f"{venv_windows}/"
 
         result = TestResult()
         pytest_result = await self.run_command(f"{venv_prefix}pytest {test_path} -v")
