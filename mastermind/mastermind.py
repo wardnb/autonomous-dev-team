@@ -927,6 +927,14 @@ EXAMPLE - to change button text:
 
             data = json.loads(json_match)
 
+            # Validate strategy has at least one edit_file action
+            steps = data.get("steps", [])
+            edit_actions = [s for s in steps if s.get("action") == "edit_file"]
+            if not edit_actions:
+                logger.error("Strategy has no edit_file actions - invalid strategy")
+                logger.warning(f"Strategy steps: {steps}")
+                return None
+
             # Check if approval is needed based on category
             from mastermind_config import REQUIRE_APPROVAL_FOR
 
@@ -989,6 +997,12 @@ EXAMPLE - to change button text:
             # Require at least one edit_file to succeed (not just test additions)
             if edit_attempted > 0 and edit_succeeded == 0:
                 session.error_message = f"All {edit_attempted} edit(s) failed: {'; '.join(failed_edits[:3])}"
+                logger.error(f"Implementation failed: {session.error_message}")
+                return False
+
+            # If no edits were attempted, the strategy was incomplete
+            if edit_attempted == 0:
+                session.error_message = "Strategy had no edit_file actions - incomplete strategy generation"
                 logger.error(f"Implementation failed: {session.error_message}")
                 return False
 
