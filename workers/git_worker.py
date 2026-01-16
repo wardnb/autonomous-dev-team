@@ -31,6 +31,9 @@ class GitWorker(BaseWorker):
 
         self.log(f"Creating branch: {branch_name}")
 
+        # Discard any uncommitted changes first to ensure clean state
+        await self.run_command("git checkout -- .")
+
         # Ensure we're on main and up to date
         await self.run_command("git checkout main")
         await self.run_command("git pull origin main")
@@ -269,11 +272,20 @@ Automated by Mastermind Agent
     async def rollback(self, branch_name: Optional[str] = None) -> WorkerResult:
         """
         Rollback changes - checkout main and delete the fix branch.
+
+        IMPORTANT: We must discard all working directory changes to ensure
+        a clean state. Just switching branches doesn't reset modified files.
         """
         self.log("Rolling back changes")
 
-        # Checkout main
+        # First discard any uncommitted changes to ensure clean state
+        await self.run_command("git checkout -- .")
+
+        # Then checkout main
         await self.run_command("git checkout main")
+
+        # Discard any changes again (in case main had uncommitted changes)
+        await self.run_command("git checkout -- .")
 
         # Delete local branch if provided
         if branch_name:
