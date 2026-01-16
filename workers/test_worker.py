@@ -58,15 +58,23 @@ class TestWorker(BaseWorker):
         if not pytest_result.success:
             result.failed_tests = self._parse_failed_tests(pytest_result.message)
 
-        # Skip black check - codebase not yet black-formatted
-        # TODO: Enable once codebase is formatted
-        self.log("Skipping black check (codebase not yet formatted)...")
-        result.black_passed = True
+        # Run black check
+        self.log("Running black formatting check...")
+        black_result = await self.run_command(
+            f"{venv_prefix}python -m black --check --diff ."
+        )
+        result.black_passed = black_result.success
+        if not black_result.success:
+            outputs.append(f"=== BLACK ===\n{black_result.message[:1000]}")
 
-        # Skip flake8 - codebase has pre-existing lint errors
-        # TODO: Enable once codebase is cleaned up
-        self.log("Skipping flake8 check (pre-existing lint errors)...")
-        result.flake8_passed = True
+        # Run flake8
+        self.log("Running flake8 lint check...")
+        flake8_result = await self.run_command(
+            f"{venv_prefix}python -m flake8 . --max-line-length=120 --exclude=venv,__pycache__,.git"
+        )
+        result.flake8_passed = flake8_result.success
+        if not flake8_result.success:
+            outputs.append(f"=== FLAKE8 ===\n{flake8_result.message[:1000]}")
 
         # Skip mypy - codebase has pre-existing type errors
         # TODO: Enable once type annotations are fixed
@@ -132,7 +140,8 @@ class TestWorker(BaseWorker):
 
         # Run the specific agent
         result = await self.run_command(
-            f"python orchestrator.py --agent {agent_key.split('_')[0]}", cwd=self.codebase_path / "dev_platform"
+            f"python orchestrator.py --agent {agent_key.split('_')[0]}",
+            cwd=self.codebase_path / "dev_platform",
         )
 
         if not result.success:
@@ -166,7 +175,9 @@ class TestWorker(BaseWorker):
 
     async def _run_orchestrator_validation(self) -> bool:
         """Run the full orchestrator and check results."""
-        result = await self.run_command("python orchestrator.py", cwd=self.codebase_path / "dev_platform")
+        result = await self.run_command(
+            "python orchestrator.py", cwd=self.codebase_path / "dev_platform"
+        )
 
         # Check for critical/high issues
         if "critical" in result.message.lower():

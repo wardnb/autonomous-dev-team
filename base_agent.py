@@ -15,6 +15,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 
 import anthropic
+from bs4 import BeautifulSoup
 
 from config import FAMILY_ARCHIVE_URL, FAMILY_ARCHIVE_API
 from discord_utils import bug_report, dev_log
@@ -310,9 +311,24 @@ Be creative but realistic. If you can't think of anything, return an empty array
         self.log_action("attempting_login", {"email": self.email})
 
         try:
+            # First, GET the login page to extract the CSRF token
+            login_page = self.session.get(f"{FAMILY_ARCHIVE_URL}/login", timeout=30)
+
+            # Extract CSRF token from the form
+            csrf_token = None
+            soup = BeautifulSoup(login_page.text, "html.parser")
+            csrf_input = soup.find("input", {"name": "csrf_token"})
+            if csrf_input:
+                csrf_token = csrf_input.get("value")
+
+            # Build form data with CSRF token
+            form_data = {"email": self.email, "password": self.password}
+            if csrf_token:
+                form_data["csrf_token"] = csrf_token
+
             response = self.session.post(
                 f"{FAMILY_ARCHIVE_URL}/login",
-                data={"email": self.email, "password": self.password},
+                data=form_data,
                 allow_redirects=False,
                 timeout=30,
             )
@@ -323,7 +339,7 @@ Be creative but realistic. If you can't think of anything, return an empty array
                 self.log_action("login_success")
                 return True
             else:
-                self.log_action("login_failed", {"status": response.status_code})
+                self.log_action("login_failed", {"status": response.status_code, "response": response.text[:200]})
                 return False
         except Exception as e:
             self.log_action("login_error", {"error": str(e)})
