@@ -892,12 +892,18 @@ HTML/TEMPLATE EDITING RULES (CRITICAL - READ CAREFULLY):
 1. ALWAYS use the EXACT text from the "Affected Files" section above - copy-paste, don't type from memory
 2. old_code must be a VERBATIM copy - every character, space, quote, AND CASE must match exactly
 3. CASE SENSITIVITY IS CRITICAL: "Sign In" != "Sign in" != "sign in" - check the actual file!
-4. For button text changes: include the full <button> tag on a single line
+4. For button text changes: include the FULL <button ...>text</button> tag, not just the text
 5. For placeholder changes: include the full <input> tag on a single line
 6. Use \\n to join multiple lines into a single JSON string
 7. VERIFY: Search the file content above for your old_code - if it doesn't appear exactly once, your edit will FAIL
+8. UNIQUENESS IS CRITICAL: If text appears multiple times (e.g., in HTML and JavaScript), include enough context to make it unique:
+   - For HTML buttons: include the full tag like `<button type="submit" class="login-btn">Sign In</button>`
+   - For JavaScript: include the surrounding code like `btn.innerHTML = 'Sign in with Passkey'`
+9. The description field helps disambiguate - use phrases like "main submit button", "passkey button", "JavaScript error handler"
 
-EXAMPLE - to change button text:
+EXAMPLE - to change button text that appears multiple times:
+- BAD: old_code = "Sign In" (appears in HTML and JavaScript)
+- GOOD: old_code = "<button type=\\"submit\\" class=\\"login-btn\\">Sign In</button>" (unique)
 - Find the EXACT line in the file content above using the line numbers provided
 - If file shows: `167| <button...>Sign in with Passkey</button>` (lowercase "in")
 - old_code must use lowercase: "Sign in with Passkey" NOT "Sign In with Passkey"

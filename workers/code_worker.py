@@ -79,6 +79,14 @@ class CodeWorker(BaseWorker):
             if new_content != content:
                 return await self.write_file(file, new_content)
 
+        # Strategy 2.6: Context-aware match using description hints
+        context_match = self._find_context_aware_match(
+            content, old_code, new_code, description
+        )
+        if context_match:
+            self.log(f"Found context-aware match using description hints")
+            return await self.write_file(file, context_match)
+
         # Strategy 3: Fuzzy match using difflib SequenceMatcher
         fuzzy_match = self._find_fuzzy_match(content, old_code, threshold=0.85)
         if fuzzy_match:
@@ -187,6 +195,86 @@ class CodeWorker(BaseWorker):
                 return result
 
         return new_text
+
+    def _find_context_aware_match(
+        self, content: str, old_code: str, new_code: str, description: str
+    ) -> Optional[str]:
+        """
+        Find code using context hints from the description.
+
+        When old_code appears multiple times, use keywords in the description
+        to identify which occurrence to modify. For example:
+        - "main login button" -> look for <button type="submit">
+        - "passkey button" -> look for id="passkey-btn"
+        - "JavaScript" -> look in <script> tags
+        """
+        old_lower = old_code.lower()
+        desc_lower = description.lower()
+        lines = content.split("\n")
+
+        # Find all lines containing old_code (case-insensitive)
+        matches = []
+        for i, line in enumerate(lines):
+            if old_lower in line.lower():
+                matches.append((i, line))
+
+        if not matches:
+            return None
+
+        if len(matches) == 1:
+            # Only one match, use it
+            line_idx, line = matches[0]
+            pos = line.lower().find(old_lower)
+            actual_old = line[pos : pos + len(old_code)]
+            new_line = line[:pos] + new_code + line[pos + len(old_code) :]
+            result_lines = lines[:line_idx] + [new_line] + lines[line_idx + 1 :]
+            return "\n".join(result_lines)
+
+        # Multiple matches - use description to disambiguate
+        best_match = None
+        best_score = 0
+
+        for line_idx, line in matches:
+            score = 0
+            context_start = max(0, line_idx - 5)
+            context_end = min(len(lines), line_idx + 5)
+            context = "\n".join(lines[context_start:context_end]).lower()
+
+            # Score based on description keywords
+            if "main" in desc_lower or "submit" in desc_lower:
+                if 'type="submit"' in line.lower() or "submit" in context:
+                    score += 10
+            if "passkey" in desc_lower:
+                if "passkey" in line.lower() or "passkey" in context:
+                    score += 10
+            if "javascript" in desc_lower or "js" in desc_lower:
+                if "<script" in context or "function" in context:
+                    score += 10
+            if "button" in desc_lower:
+                if "<button" in line.lower():
+                    score += 5
+            if "first" in desc_lower:
+                score += 5 - line_idx // 50  # Prefer earlier occurrences
+            if "second" in desc_lower or "reset" in desc_lower:
+                score -= 5 - line_idx // 50  # Prefer later occurrences
+            if "error" in desc_lower:
+                if "error" in context or "catch" in context:
+                    score += 5
+
+            if score > best_score:
+                best_score = score
+                best_match = (line_idx, line)
+
+        # Only use context match if we have a clear winner
+        if best_match and best_score >= 5:
+            line_idx, line = best_match
+            pos = line.lower().find(old_lower)
+            actual_old = line[pos : pos + len(old_code)]
+            new_line = line[:pos] + new_code + line[pos + len(old_code) :]
+            result_lines = lines[:line_idx] + [new_line] + lines[line_idx + 1 :]
+            return "\n".join(result_lines)
+
+        return None
 
     def _find_fuzzy_match(
         self, content: str, target: str, threshold: float = 0.85
