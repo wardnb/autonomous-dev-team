@@ -2,9 +2,10 @@
 Code Worker - Read and write code with Claude assistance
 """
 
+import difflib
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from .base_worker import BaseWorker
 
@@ -21,9 +22,17 @@ class CodeWorker(BaseWorker):
         self.claude = claude_client
         self.model = model
 
-    async def edit_file(self, file: str, old_code: str, new_code: str, description: str = "") -> bool:
+    async def edit_file(
+        self, file: str, old_code: str, new_code: str, description: str = ""
+    ) -> bool:
         """
         Edit a file by replacing old_code with new_code.
+
+        Uses multiple strategies to find the code:
+        1. Exact match
+        2. Whitespace-normalized match
+        3. Fuzzy matching with difflib
+        4. Line-based matching for unique anchors
 
         Args:
             file: Path to the file
@@ -41,31 +50,146 @@ class CodeWorker(BaseWorker):
             self.log(f"Cannot read file: {file}", "error")
             return False
 
-        # Check if old_code exists
-        if old_code not in content:
-            # Try to find similar code
-            similar = self._find_similar_code(content, old_code)
-            if similar:
-                self.log(f"Old code not found exactly, found similar: {similar[:50]}...")
-                old_code = similar
-            else:
-                self.log(f"Old code not found in {file}", "error")
+        # Strategy 1: Exact match
+        if old_code in content:
+            occurrences = content.count(old_code)
+            if occurrences > 1:
+                self.log(
+                    f"old_code appears {occurrences} times - need unique match", "error"
+                )
                 return False
+            new_content = content.replace(old_code, new_code, 1)
+            if new_content != content:
+                return await self.write_file(file, new_content)
 
-        # Verify old_code appears exactly once to avoid wrong insertion
-        occurrences = content.count(old_code)
-        if occurrences > 1:
-            self.log(f"old_code appears {occurrences} times in {file} - need unique match", "error")
-            return False
+        # Strategy 2: Whitespace-normalized match
+        normalized_match = self._find_whitespace_normalized(content, old_code)
+        if normalized_match:
+            self.log(f"Found whitespace-normalized match")
+            new_content = content.replace(normalized_match, new_code, 1)
+            if new_content != content:
+                return await self.write_file(file, new_content)
 
-        # Replace
-        new_content = content.replace(old_code, new_code, 1)
+        # Strategy 3: Fuzzy match using difflib SequenceMatcher
+        fuzzy_match = self._find_fuzzy_match(content, old_code, threshold=0.85)
+        if fuzzy_match:
+            self.log(
+                f"Found fuzzy match (similarity {fuzzy_match[1]:.2%}): {fuzzy_match[0][:50]}..."
+            )
+            new_content = content.replace(fuzzy_match[0], new_code, 1)
+            if new_content != content:
+                return await self.write_file(file, new_content)
 
-        if new_content == content:
-            self.log(f"No changes made to {file}", "warning")
-            return False
+        # Strategy 4: Line anchor matching - find unique identifying lines
+        anchor_match = self._find_by_anchor_lines(content, old_code, new_code)
+        if anchor_match:
+            self.log(f"Found anchor-based match")
+            return await self.write_file(file, anchor_match)
 
-        return await self.write_file(file, new_content)
+        self.log(f"Old code not found in {file} using any strategy", "error")
+        return False
+
+    def _find_whitespace_normalized(self, content: str, target: str) -> Optional[str]:
+        """Find code by normalizing whitespace differences."""
+        target_normalized = " ".join(target.split())
+        lines = content.split("\n")
+
+        for i in range(len(lines)):
+            for window in range(1, min(30, len(lines) - i + 1)):
+                candidate = "\n".join(lines[i : i + window])
+                candidate_normalized = " ".join(candidate.split())
+
+                if target_normalized == candidate_normalized:
+                    return candidate
+
+        return None
+
+    def _find_fuzzy_match(
+        self, content: str, target: str, threshold: float = 0.85
+    ) -> Optional[Tuple[str, float]]:
+        """
+        Find code using fuzzy matching with difflib.
+
+        Returns (matched_text, similarity_ratio) or None.
+        """
+        target_lines = target.strip().split("\n")
+        content_lines = content.split("\n")
+        target_len = len(target_lines)
+
+        best_match = None
+        best_ratio = 0.0
+
+        # Slide a window over content lines
+        for i in range(len(content_lines) - target_len + 1):
+            candidate_lines = content_lines[i : i + target_len]
+            candidate = "\n".join(candidate_lines)
+
+            # Use SequenceMatcher for fuzzy comparison
+            ratio = difflib.SequenceMatcher(
+                None, target.strip(), candidate.strip()
+            ).ratio()
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = candidate
+
+        if best_ratio >= threshold:
+            return (best_match, best_ratio)
+        return None
+
+    def _find_by_anchor_lines(
+        self, content: str, old_code: str, new_code: str
+    ) -> Optional[str]:
+        """
+        Find and replace using anchor lines that are unique in both old_code and content.
+
+        This helps when Claude includes extra context that doesn't match exactly.
+        """
+        old_lines = old_code.strip().split("\n")
+        content_lines = content.split("\n")
+
+        # Find the most unique line in old_code (appears exactly once in content)
+        anchor_line = None
+        anchor_idx_in_old = None
+
+        for idx, line in enumerate(old_lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                continue  # Skip empty lines and comments
+
+            count = sum(1 for cl in content_lines if stripped in cl)
+            if count == 1:
+                anchor_line = stripped
+                anchor_idx_in_old = idx
+                break
+
+        if not anchor_line:
+            return None
+
+        # Find the anchor line in content
+        anchor_idx_in_content = None
+        for idx, line in enumerate(content_lines):
+            if anchor_line in line:
+                anchor_idx_in_content = idx
+                break
+
+        if anchor_idx_in_content is None:
+            return None
+
+        # Calculate the range in content that corresponds to old_code
+        lines_before_anchor = anchor_idx_in_old
+        lines_after_anchor = len(old_lines) - anchor_idx_in_old - 1
+
+        start_idx = max(0, anchor_idx_in_content - lines_before_anchor)
+        end_idx = min(
+            len(content_lines), anchor_idx_in_content + lines_after_anchor + 1
+        )
+
+        # Build the new content by replacing the identified range
+        new_lines = new_code.strip().split("\n")
+        result_lines = content_lines[:start_idx] + new_lines + content_lines[end_idx:]
+
+        return "\n".join(result_lines)
 
     async def add_test(self, file: str, code: str) -> bool:
         """
@@ -79,7 +203,9 @@ class CodeWorker(BaseWorker):
         self.log(f"Skipping test file creation for {file} (tests require fixtures)")
         return True  # Return True so we don't block the fix
 
-    async def generate_fix(self, file: str, issue_description: str, context: str = "") -> Optional[dict]:
+    async def generate_fix(
+        self, file: str, issue_description: str, context: str = ""
+    ) -> Optional[dict]:
         """
         Use Claude to generate a fix for a file.
 
@@ -121,8 +247,11 @@ Rules:
   - Keep lines under 120 characters when possible"""
 
         try:
-            response = self.claude.messages.create(
-                model=self.model, max_tokens=2000, messages=[{"role": "user", "content": prompt}]
+            # Use await for async Claude client
+            response = await self.claude.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
             )
 
             text = response.content[0].text
@@ -162,7 +291,9 @@ Rules:
         if content is None:
             return None
 
-        pattern = rf"(class\s+{re.escape(class_name)}\s*(?:\([^)]*\))?:.*?)(?=\nclass\s|\Z)"
+        pattern = (
+            rf"(class\s+{re.escape(class_name)}\s*(?:\([^)]*\))?:.*?)(?=\nclass\s|\Z)"
+        )
 
         match = re.search(pattern, content, re.DOTALL)
         if match:
@@ -170,7 +301,9 @@ Rules:
 
         return None
 
-    async def search_codebase(self, pattern: str, file_types: List[str] = None) -> List[dict]:
+    async def search_codebase(
+        self, pattern: str, file_types: List[str] = None
+    ) -> List[dict]:
         """
         Search the codebase for a pattern.
 
@@ -180,7 +313,10 @@ Rules:
         matches = []
 
         for file_type in file_types:
-            result = await self.run_command(f'grep -rn "{pattern}" --include="{file_type}" .', cwd=self.codebase_path)
+            result = await self.run_command(
+                f'grep -rn "{pattern}" --include="{file_type}" .',
+                cwd=self.codebase_path,
+            )
 
             if result.success and result.message:
                 for line in result.message.split("\n"):
@@ -188,43 +324,11 @@ Rules:
                         parts = line.split(":", 2)
                         if len(parts) >= 3:
                             matches.append(
-                                {"file": parts[0].lstrip("./"), "line": int(parts[1]), "content": parts[2].strip()}
+                                {
+                                    "file": parts[0].lstrip("./"),
+                                    "line": int(parts[1]),
+                                    "content": parts[2].strip(),
+                                }
                             )
 
         return matches
-
-    def _find_similar_code(self, content: str, target: str, threshold: float = 0.8) -> Optional[str]:
-        """
-        Find code similar to target in content.
-
-        Useful when exact match fails due to whitespace differences.
-        """
-        # Normalize whitespace for comparison
-        target_normalized = " ".join(target.split())
-
-        # Try to find it in the content
-        lines = content.split("\n")
-
-        for i in range(len(lines)):
-            # Try increasingly larger windows
-            for window in range(1, min(20, len(lines) - i)):
-                candidate = "\n".join(lines[i : i + window])
-                candidate_normalized = " ".join(candidate.split())
-
-                if target_normalized in candidate_normalized:
-                    return candidate
-
-                # Check similarity ratio
-                if self._similarity(target_normalized, candidate_normalized) > threshold:
-                    return candidate
-
-        return None
-
-    def _similarity(self, a: str, b: str) -> float:
-        """Calculate similarity ratio between two strings."""
-        if not a or not b:
-            return 0.0
-
-        # Simple character-based similarity
-        matches = sum(1 for ca, cb in zip(a, b) if ca == cb)
-        return matches / max(len(a), len(b))

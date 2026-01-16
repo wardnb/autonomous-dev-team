@@ -46,7 +46,8 @@ class MastermindAgent:
             rate_limiter: RateLimiter instance for rate control
             learning_tracker: LearningTracker instance for self-improvement
         """
-        self.client = anthropic.Anthropic(api_key=api_key)
+        # Use async client to avoid blocking Discord's event loop
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.model = model
         self.codebase_path = codebase_path or Path("/home/dev/family_archive")
 
@@ -94,22 +95,55 @@ class MastermindAgent:
         """Process a single fix session with retry loop."""
         from mastermind_config import MAX_FIX_RETRIES
 
-        max_retries = getattr(MAX_FIX_RETRIES, "__int__", lambda: 3)() if hasattr(MAX_FIX_RETRIES, "__int__") else 3
+        max_retries = (
+            getattr(MAX_FIX_RETRIES, "__int__", lambda: 3)()
+            if hasattr(MAX_FIX_RETRIES, "__int__")
+            else 3
+        )
 
         strategy = None
         try:
+            # Step 0: Classify the issue (bug vs feature vs improvement)
+            await self._update_status(session, FixStatus.ANALYZING, "Classifying issue")
+            classification = await self.classify_issue(session)
+
+            issue_type = classification.get("issue_type", "unclear")
+            can_auto_fix = classification.get("can_auto_fix", False)
+            suggested_action = classification.get(
+                "suggested_action", "needs_human_review"
+            )
+
+            # Skip feature requests and unclear issues
+            if not can_auto_fix or suggested_action == "skip":
+                reason = classification.get("reason", "Not suitable for auto-fix")
+                logger.info(f"Skipping {issue_type}: {reason}")
+                await self._update_status(
+                    session,
+                    FixStatus.BLOCKED,
+                    f"Skipped ({issue_type}): {reason[:100]}",
+                )
+                return
+
             # Step 1: Analyze the issue (only done once)
-            await self._update_status(session, FixStatus.ANALYZING)
+            await self._update_status(
+                session, FixStatus.ANALYZING, "Analyzing root cause"
+            )
             analysis = await self.analyze_issue(session)
 
             if not analysis:
-                await self._update_status(session, FixStatus.FAILED, "Failed to analyze issue")
-                await self._record_failure(session, "analyzing", "Failed to analyze issue")
+                await self._update_status(
+                    session, FixStatus.FAILED, "Failed to analyze issue"
+                )
+                await self._record_failure(
+                    session, "analyzing", "Failed to analyze issue"
+                )
                 return
 
             # Retry loop for strategy -> implement -> test cycle
             for attempt in range(1, max_retries + 1):
-                logger.info(f"Fix attempt {attempt}/{max_retries} for session {session.id}")
+                logger.info(
+                    f"Fix attempt {attempt}/{max_retries} for session {session.id}"
+                )
 
                 # Reset session state for retry
                 session.files_modified = []
@@ -117,16 +151,24 @@ class MastermindAgent:
                 session.error_message = None
 
                 # Step 2: Create fix strategy (re-done each attempt to incorporate new lessons)
-                await self._update_status(session, FixStatus.STRATEGIZING, f"Attempt {attempt}/{max_retries}")
+                await self._update_status(
+                    session, FixStatus.STRATEGIZING, f"Attempt {attempt}/{max_retries}"
+                )
                 strategy = await self.create_strategy(session, analysis)
                 session.strategy = strategy
 
                 if not strategy:
-                    await self._record_failure(session, "strategizing", "Failed to create fix strategy")
+                    await self._record_failure(
+                        session, "strategizing", "Failed to create fix strategy"
+                    )
                     if attempt < max_retries:
                         await self._wait_for_learning(session)
                         continue
-                    await self._update_status(session, FixStatus.FAILED, "Failed to create fix strategy after retries")
+                    await self._update_status(
+                        session,
+                        FixStatus.FAILED,
+                        "Failed to create fix strategy after retries",
+                    )
                     return
 
                 # Step 3: Check if approval needed (only on first attempt)
@@ -135,40 +177,58 @@ class MastermindAgent:
                     approved = await self._request_approval(session, strategy)
 
                     if not approved:
-                        await self._update_status(session, FixStatus.BLOCKED, "Human approval not granted")
+                        await self._update_status(
+                            session, FixStatus.BLOCKED, "Human approval not granted"
+                        )
                         return  # Not a failure to learn from
 
                 # Step 4: Implement fix
-                await self._update_status(session, FixStatus.IMPLEMENTING, f"Attempt {attempt}/{max_retries}")
+                await self._update_status(
+                    session, FixStatus.IMPLEMENTING, f"Attempt {attempt}/{max_retries}"
+                )
                 success = await self.implement_fix(session, strategy)
 
                 if not success:
                     error_msg = session.error_message or "Failed to implement fix"
-                    await self._record_failure(session, "implementing", error_msg, strategy)
+                    await self._record_failure(
+                        session, "implementing", error_msg, strategy
+                    )
                     if attempt < max_retries:
                         await self._wait_for_learning(session)
                         await self.rollback(session)
                         continue
                     await self._update_status(
-                        session, FixStatus.FAILED, f"Failed to implement fix after {max_retries} attempts"
+                        session,
+                        FixStatus.FAILED,
+                        f"Failed to implement fix after {max_retries} attempts",
                     )
                     return
 
                 # Step 5: Run tests
-                await self._update_status(session, FixStatus.TESTING, f"Attempt {attempt}/{max_retries}")
+                await self._update_status(
+                    session, FixStatus.TESTING, f"Attempt {attempt}/{max_retries}"
+                )
                 tests_passed = await self.run_tests(session)
 
                 if not tests_passed:
-                    await self._record_failure(session, "testing", "Tests failed after fix", strategy)
+                    await self._record_failure(
+                        session, "testing", "Tests failed after fix", strategy
+                    )
                     await self.rollback(session)
                     if attempt < max_retries:
                         await self._wait_for_learning(session)
                         continue
-                    await self._update_status(session, FixStatus.FAILED, f"Tests failed after {max_retries} attempts")
+                    await self._update_status(
+                        session,
+                        FixStatus.FAILED,
+                        f"Tests failed after {max_retries} attempts",
+                    )
                     return
 
                 # Success! Break out of retry loop
-                logger.info(f"Fix succeeded on attempt {attempt} for session {session.id}")
+                logger.info(
+                    f"Fix succeeded on attempt {attempt} for session {session.id}"
+                )
                 break
 
             # Step 6: Commit and create PR
@@ -177,16 +237,24 @@ class MastermindAgent:
             session.pr_url = pr_url
 
             if not pr_url:
-                await self._update_status(session, FixStatus.FAILED, "Failed to create PR")
-                await self._record_failure(session, "pr_creation", "Failed to create PR", strategy)
+                await self._update_status(
+                    session, FixStatus.FAILED, "Failed to create PR"
+                )
+                await self._record_failure(
+                    session, "pr_creation", "Failed to create PR", strategy
+                )
                 return
 
             # Step 7: Wait for CI and handle failures
             pr_number = self._extract_pr_number(pr_url)
             if pr_number:
-                ci_success = await self._wait_and_fix_ci(session, strategy, pr_number, max_retries)
+                ci_success = await self._wait_and_fix_ci(
+                    session, strategy, pr_number, max_retries
+                )
                 if not ci_success:
-                    await self._update_status(session, FixStatus.FAILED, "CI failed after retries")
+                    await self._update_status(
+                        session, FixStatus.FAILED, "CI failed after retries"
+                    )
                     return
 
             # Step 8: Deploy (optional - skip if auto-deploy is disabled)
@@ -197,8 +265,12 @@ class MastermindAgent:
                 deployed = await self.deploy(session)
 
                 if not deployed:
-                    await self._update_status(session, FixStatus.FAILED, "Deployment failed")
-                    await self._record_failure(session, "deploying", "Deployment failed", strategy)
+                    await self._update_status(
+                        session, FixStatus.FAILED, "Deployment failed"
+                    )
+                    await self._record_failure(
+                        session, "deploying", "Deployment failed", strategy
+                    )
                     return
 
                 # Step 9: Validate fix
@@ -211,12 +283,20 @@ class MastermindAgent:
                     await self._notify_success(session)
                     await self._record_lesson_outcome(session, success=True)
                 else:
-                    await self._update_status(session, FixStatus.ROLLED_BACK, "Validation failed - rolled back")
-                    await self._record_failure(session, "validating", "Validation failed", strategy)
+                    await self._update_status(
+                        session,
+                        FixStatus.ROLLED_BACK,
+                        "Validation failed - rolled back",
+                    )
+                    await self._record_failure(
+                        session, "validating", "Validation failed", strategy
+                    )
                     await self.rollback(session)
             else:
                 # Skip deployment - mark as completed after PR creation and CI pass
-                await self._update_status(session, FixStatus.COMPLETED, f"PR created and CI passed: {pr_url}")
+                await self._update_status(
+                    session, FixStatus.COMPLETED, f"PR created and CI passed: {pr_url}"
+                )
                 await self._notify_success(session)
                 await self._record_lesson_outcome(session, success=True)
 
@@ -255,7 +335,9 @@ class MastermindAgent:
         pr_monitor = PRMonitorWorker(session, self.codebase_path)
 
         for ci_attempt in range(1, max_retries + 1):
-            logger.info(f"CI check attempt {ci_attempt}/{max_retries} for PR #{pr_number}")
+            logger.info(
+                f"CI check attempt {ci_attempt}/{max_retries} for PR #{pr_number}"
+            )
 
             # Wait for CI to complete
             await self._update_status(
@@ -292,12 +374,16 @@ class MastermindAgent:
 
             if not failures:
                 logger.error("CI failed but couldn't get failure details")
-                await self._record_failure(session, "ci_failure", "CI failed - unable to get details", strategy)
+                await self._record_failure(
+                    session, "ci_failure", "CI failed - unable to get details", strategy
+                )
                 return False
 
             # Log and record failures
             for failure in failures:
-                logger.info(f"CI failure: {failure.failure_type} - {failure.error_message}")
+                logger.info(
+                    f"CI failure: {failure.failure_type} - {failure.error_message}"
+                )
                 await self._record_failure(
                     session,
                     f"ci_{failure.failure_type}",
@@ -318,13 +404,19 @@ class MastermindAgent:
                         logger.info(f"Fixed lint failure: {failure.error_message}")
                     elif result.data and result.data.get("needs_claude"):
                         # Flake8 error that needs Claude to fix
-                        logger.info(f"Flake8 error needs Claude: {failure.error_message}")
-                        fixed = await self._fix_ci_failure_with_claude(session, strategy, failure)
+                        logger.info(
+                            f"Flake8 error needs Claude: {failure.error_message}"
+                        )
+                        fixed = await self._fix_ci_failure_with_claude(
+                            session, strategy, failure
+                        )
                         if fixed:
                             fixed_any = True
                 else:
                     # Other failures need Claude analysis
-                    fixed = await self._fix_ci_failure_with_claude(session, strategy, failure)
+                    fixed = await self._fix_ci_failure_with_claude(
+                        session, strategy, failure
+                    )
                     if fixed:
                         fixed_any = True
 
@@ -440,7 +532,9 @@ IMPORTANT:
                 return False
 
             # Apply the fix
-            code_worker = CodeWorker(session, self.codebase_path, self.client, self.model)
+            code_worker = CodeWorker(
+                session, self.codebase_path, self.client, self.model
+            )
             success = await code_worker.edit_file(
                 file=fix.get("file"),
                 old_code=fix.get("old_code"),
@@ -473,7 +567,11 @@ IMPORTANT:
         logger.info("Proceeding with retry using any new lessons learned")
 
     async def _record_failure(
-        self, session: FixSession, stage: str, error: str, strategy: Optional[FixStrategy] = None
+        self,
+        session: FixSession,
+        stage: str,
+        error: str,
+        strategy: Optional[FixStrategy] = None,
     ):
         """Record a failure and trigger learning analysis."""
         if not self.learning_tracker:
@@ -487,7 +585,8 @@ IMPORTANT:
                 error_message=error,
                 issue_category=session.issue.category,
                 issue_title=session.issue.title,
-                files_involved=session.files_modified or (strategy.files_affected if strategy else []),
+                files_involved=session.files_modified
+                or (strategy.files_affected if strategy else []),
                 strategy=(
                     {
                         "complexity": strategy.complexity,
@@ -513,7 +612,9 @@ IMPORTANT:
 
         try:
             self.learning_tracker.record_lesson_outcome(session.id, success)
-            logger.info(f"Recorded lesson outcome for session {session.id}: {'success' if success else 'failure'}")
+            logger.info(
+                f"Recorded lesson outcome for session {session.id}: {'success' if success else 'failure'}"
+            )
         except Exception as e:
             logger.error(f"Failed to record lesson outcome: {e}")
 
@@ -573,7 +674,88 @@ Respond in JSON format:
             logger.error(f"Failed to parse analysis JSON: {e}")
             return None
 
-    async def create_strategy(self, session: FixSession, analysis: dict) -> Optional[FixStrategy]:
+    async def classify_issue(self, session: FixSession) -> dict:
+        """
+        Classify whether an issue is a bug, feature request, or improvement.
+
+        Returns dict with:
+        - issue_type: "bug" | "feature_request" | "improvement" | "unclear"
+        - can_auto_fix: bool - whether Mastermind should attempt to fix this
+        - reason: str - explanation of classification
+        - suggested_action: str - what to do (e.g., "fix", "skip", "request_clarification")
+        """
+        issue = session.issue
+
+        prompt = f"""Classify this issue to determine if it can be auto-fixed.
+
+**Issue Title:** {issue.title}
+**Description:** {issue.description}
+**Category:** {issue.category}
+**Severity:** {issue.severity}
+**Reporter:** {issue.reporter}
+**Expected:** {issue.expected or 'Not specified'}
+**Actual:** {issue.actual or 'Not specified'}
+
+Classify this issue:
+
+1. **BUG**: Something that was working before but is now broken, or clearly incorrect behavior
+   - Examples: "Login fails with error", "Button doesn't work", "Data is corrupted"
+   - These CAN be auto-fixed by finding and modifying existing code
+
+2. **FEATURE_REQUEST**: A request for new functionality that doesn't exist yet
+   - Examples: "Add dark mode", "Add search functionality", "Add profile pictures"
+   - These CANNOT be auto-fixed as they require writing substantial new code
+
+3. **IMPROVEMENT**: Existing feature works but could be better (UI tweaks, performance, etc.)
+   - Examples: "Make the page load faster", "Better error messages"
+   - These MAY be auto-fixable depending on scope
+
+4. **UNCLEAR**: Not enough information to classify
+   - Request more details before proceeding
+
+Respond in JSON:
+{{
+    "issue_type": "bug|feature_request|improvement|unclear",
+    "can_auto_fix": true/false,
+    "confidence": "high|medium|low",
+    "reason": "Brief explanation of why this classification",
+    "suggested_action": "fix|skip|request_clarification|needs_human_review"
+}}"""
+
+        response = await self._query_claude(prompt, session, max_tokens=500)
+        if not response:
+            return {
+                "issue_type": "unclear",
+                "can_auto_fix": False,
+                "confidence": "low",
+                "reason": "Failed to classify",
+                "suggested_action": "needs_human_review",
+            }
+
+        try:
+            json_match = response
+            if "```json" in response:
+                json_match = response.split("```json")[1].split("```")[0]
+            elif "```" in response:
+                json_match = response.split("```")[1].split("```")[0]
+
+            result = json.loads(json_match.strip())
+            logger.info(
+                f"Issue classified as {result.get('issue_type')}: {result.get('reason', '')[:100]}"
+            )
+            return result
+        except json.JSONDecodeError:
+            return {
+                "issue_type": "unclear",
+                "can_auto_fix": False,
+                "confidence": "low",
+                "reason": "Failed to parse classification response",
+                "suggested_action": "needs_human_review",
+            }
+
+    async def create_strategy(
+        self, session: FixSession, analysis: dict
+    ) -> Optional[FixStrategy]:
         """Create a detailed fix strategy."""
         issue = session.issue
 
@@ -584,7 +766,9 @@ Respond in JSON format:
             try:
                 file_path = self.codebase_path / file
                 if file_path.exists():
-                    code_contents[file] = file_path.read_text()[:10000]  # Limit size
+                    # For templates, include full content so old_code can be matched exactly
+                    max_size = 20000 if file.endswith(".html") else 10000
+                    code_contents[file] = file_path.read_text()[:max_size]
             except Exception as e:
                 logger.warning(f"Could not read {file}: {e}")
 
@@ -600,16 +784,22 @@ Respond in JSON format:
                 if lessons:
                     # Track which lessons we're applying
                     session.applied_lesson_ids = [lesson.id for lesson in lessons]
-                    self.learning_tracker.record_lesson_application(session.applied_lesson_ids, session.id)
+                    self.learning_tracker.record_lesson_application(
+                        session.applied_lesson_ids, session.id
+                    )
 
                     # Build lessons section for prompt
-                    lessons_text = chr(10).join(f"- {lesson.prevention_rule}" for lesson in lessons)
+                    lessons_text = chr(10).join(
+                        f"- {lesson.prevention_rule}" for lesson in lessons
+                    )
                     lessons_section = f"""
 
 LESSONS FROM PAST FAILURES (avoid these mistakes):
 {lessons_text}
 """
-                    logger.info(f"Injecting {len(lessons)} lessons into strategy prompt")
+                    logger.info(
+                        f"Injecting {len(lessons)} lessons into strategy prompt"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to get lessons: {e}")
 
@@ -621,7 +811,7 @@ LESSONS FROM PAST FAILURES (avoid these mistakes):
 **Approach:** {analysis.get('approach', 'Unknown')}
 
 **Affected Files:**
-{chr(10).join(f'### {f}{chr(10)}```python{chr(10)}{c[:3000]}{chr(10)}```' for f, c in code_contents.items())}
+{chr(10).join(f'### {f}{chr(10)}```{"html" if f.endswith(".html") else "python"}{chr(10)}{c}{chr(10)}```' for f, c in code_contents.items())}
 
 Generate a step-by-step fix plan. Include:
 1. Specific code changes needed (with line references if possible)
@@ -687,7 +877,14 @@ CODE QUALITY REQUIREMENTS (must pass CI):
 FRAMEWORK-SPECIFIC NOTES:
 - Flask 2.x: Do NOT use `from flask import escape` - it was removed. Use `from markupsafe import escape` instead
 - Jinja2: Templates auto-escape by default, so {{ variable }} is already safe. Only use |safe filter for trusted HTML
-- For XSS protection, prefer template escaping over manual escaping in Python code{lessons_section}"""
+- For XSS protection, prefer template escaping over manual escaping in Python code
+
+HTML TEMPLATE EDITING RULES (CRITICAL):
+- old_code MUST be copied EXACTLY from the file content shown above - character for character
+- Include complete HTML tags and surrounding whitespace exactly as shown
+- For form edits: include the opening <form> tag line and at least the first line inside it
+- Example for CSRF: old_code should be the exact <form> line including attributes
+- Test that your old_code string appears exactly once in the file content above before using it{lessons_section}"""
 
         response = await self._query_claude(prompt, session, max_tokens=6000)
         if not response:
@@ -738,7 +935,9 @@ FRAMEWORK-SPECIFIC NOTES:
             session.branch_name = branch_name
 
             # Apply each step
-            code_worker = CodeWorker(session, self.codebase_path, self.client, self.model)
+            code_worker = CodeWorker(
+                session, self.codebase_path, self.client, self.model
+            )
 
             edit_attempted = 0
             edit_succeeded = 0
@@ -759,10 +958,14 @@ FRAMEWORK-SPECIFIC NOTES:
                         edit_succeeded += 1
                         session.files_modified.append(step.get("file"))
                     else:
-                        failed_edits.append(f"{step.get('file')}: {step.get('description', 'edit failed')}")
+                        failed_edits.append(
+                            f"{step.get('file')}: {step.get('description', 'edit failed')}"
+                        )
 
                 elif action == "add_test":
-                    success = await code_worker.add_test(file=step.get("file"), code=step.get("code"))
+                    success = await code_worker.add_test(
+                        file=step.get("file"), code=step.get("code")
+                    )
                     if success:
                         session.files_modified.append(step.get("file"))
 
@@ -792,7 +995,9 @@ FRAMEWORK-SPECIFIC NOTES:
             logger.exception(f"Error running tests: {e}")
             return False
 
-    async def create_pull_request(self, session: FixSession, strategy: FixStrategy) -> Optional[str]:
+    async def create_pull_request(
+        self, session: FixSession, strategy: FixStrategy
+    ) -> Optional[str]:
         """Create a pull request for the fix."""
         from workers import GitWorker
 
@@ -808,6 +1013,26 @@ FRAMEWORK-SPECIFIC NOTES:
 
             # Create PR
             pr_url = await git_worker.create_pr(session.branch_name, strategy)
+            if not pr_url:
+                return None
+
+            # Extract PR number and wait for CI
+            pr_number = self._extract_pr_number(pr_url)
+            if pr_number:
+                logger.info(f"Waiting for CI checks on PR #{pr_number}...")
+                ci_result = await git_worker.wait_for_ci(pr_number, timeout_minutes=10)
+                if not ci_result.success:
+                    logger.error(f"CI failed for PR #{pr_number}: {ci_result.error}")
+                    # Record the failure for learning
+                    if self.learning_tracker:
+                        await self._record_failure(
+                            session, "ci_failed", ci_result.error, {"pr_url": pr_url}
+                        )
+                    # Don't return None - PR exists but CI failed
+                    session.error_message = f"CI failed: {ci_result.error}"
+                else:
+                    logger.info(f"CI passed for PR #{pr_number}")
+
             return pr_url
 
         except Exception as e:
@@ -859,7 +1084,11 @@ FRAMEWORK-SPECIFIC NOTES:
             logger.exception(f"Error rolling back: {e}")
 
     async def _query_claude(
-        self, prompt: str, session: FixSession, max_tokens: int = 2000, model: Optional[str] = None
+        self,
+        prompt: str,
+        session: FixSession,
+        max_tokens: int = 2000,
+        model: Optional[str] = None,
     ) -> Optional[str]:
         """Query Claude API with cost and rate tracking."""
         model = model or self.model
@@ -875,8 +1104,11 @@ FRAMEWORK-SPECIFIC NOTES:
             return None
 
         try:
-            response = self.client.messages.create(
-                model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}]
+            # Use await since we're using AsyncAnthropic
+            response = await self.client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
             )
 
             # Track usage
@@ -892,7 +1124,9 @@ FRAMEWORK-SPECIFIC NOTES:
                     operation="mastermind_query",
                 )
 
-            session.add_tokens(response.usage.input_tokens, response.usage.output_tokens, model)
+            session.add_tokens(
+                response.usage.input_tokens, response.usage.output_tokens, model
+            )
 
             return response.content[0].text
 
@@ -927,14 +1161,18 @@ FRAMEWORK-SPECIFIC NOTES:
 
         return "\n".join(content_parts) if content_parts else "No relevant files found."
 
-    async def _update_status(self, session: FixSession, status: FixStatus, message: Optional[str] = None):
+    async def _update_status(
+        self, session: FixSession, status: FixStatus, message: Optional[str] = None
+    ):
         """Update session status and notify via Discord."""
         session.update_status(status, message)
 
         if self.bot:
             await self.bot.update_session_status(session, status, message)
 
-    async def _request_approval(self, session: FixSession, strategy: FixStrategy) -> bool:
+    async def _request_approval(
+        self, session: FixSession, strategy: FixStrategy
+    ) -> bool:
         """Request human approval for the fix."""
         if self.bot:
             return await self.bot.request_approval(session, strategy.description)
@@ -950,6 +1188,12 @@ FRAMEWORK-SPECIFIC NOTES:
         active = [
             s
             for s in self.active_sessions.values()
-            if s.status not in (FixStatus.COMPLETED, FixStatus.FAILED, FixStatus.ROLLED_BACK, FixStatus.BLOCKED)
+            if s.status
+            not in (
+                FixStatus.COMPLETED,
+                FixStatus.FAILED,
+                FixStatus.ROLLED_BACK,
+                FixStatus.BLOCKED,
+            )
         ]
         return len(active) > 0

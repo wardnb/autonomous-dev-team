@@ -43,14 +43,19 @@ from safety.cost_tracker import CostTracker
 from safety.rate_limiter import RateLimiter
 from safety.learning_tracker import LearningTracker
 
-# Configure logging
+# Configure logging with proper encoding for Windows
+import io
+
+# Create handlers with UTF-8 encoding to handle emoji in Discord messages
+stream_handler = logging.StreamHandler(
+    stream=io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+)
+file_handler = logging.FileHandler("mastermind.log", encoding='utf-8')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("mastermind.log"),
-    ],
+    handlers=[stream_handler, file_handler],
 )
 logger = logging.getLogger(__name__)
 
@@ -141,9 +146,10 @@ class MastermindRunner:
         self.mastermind.bot = self.bot
         self.bot.mastermind = self.mastermind
 
-        # Set up signal handlers
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            asyncio.get_event_loop().add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+        # Set up signal handlers (only on Unix - Windows uses KeyboardInterrupt)
+        if sys.platform != "win32":
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                asyncio.get_event_loop().add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
         # Start processing loop
         processing_task = asyncio.create_task(self.mastermind.process_loop())
