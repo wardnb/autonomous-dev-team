@@ -93,7 +93,7 @@ class BaseWorker:
         """Read a file from the codebase."""
         full_path = self.codebase_path / file_path
         try:
-            return full_path.read_text()
+            return full_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             self.log(f"File not found: {file_path}", "warning")
             return None
@@ -107,7 +107,8 @@ class BaseWorker:
         try:
             # Create parent directories if needed
             full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(content)
+            # Use UTF-8 encoding to handle emojis and special characters
+            full_path.write_text(content, encoding="utf-8")
             self.log(f"Wrote {len(content)} bytes to {file_path}")
             return True
         except Exception as e:

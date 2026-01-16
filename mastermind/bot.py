@@ -22,7 +22,7 @@ import discord
 from discord.ext import commands
 
 from .session import Issue, FixSession, FixStatus
-from .issue_parser import parse_discord_embed
+from .issue_parser import parse_discord_embed, parse_text_bug_report
 
 if TYPE_CHECKING:
     from .mastermind import MastermindAgent
@@ -106,16 +106,23 @@ class MastermindBot(commands.Bot):
         if message.id in self._processed_messages:
             return
 
-        # Check if this is a bug report (has embeds)
-        if not message.embeds:
-            return
+        # Try to parse as a bug report
+        issue = None
 
-        # Parse the bug report
-        for embed in message.embeds:
-            issue = parse_discord_embed(embed.to_dict())
-            if issue:
-                await self._handle_new_issue(message, issue)
-                break
+        # Check if this is an embed-based bug report
+        if message.embeds:
+            for embed in message.embeds:
+                issue = parse_discord_embed(embed.to_dict())
+                if issue:
+                    break
+
+        # Check if this is a plain text bug report (starts with 🐛)
+        if not issue and message.content.startswith("🐛"):
+            issue = parse_text_bug_report(message.content)
+
+        # Process the issue if found
+        if issue:
+            await self._handle_new_issue(message, issue)
 
     async def _handle_new_issue(self, message: discord.Message, issue: Issue):
         """Handle a new issue from the bugs channel."""

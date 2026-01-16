@@ -184,3 +184,69 @@ def extract_file_references(text: str) -> List[str]:
         files.extend(matches)
 
     return list(set(files))
+
+
+def parse_text_bug_report(content: str) -> Optional[Issue]:
+    """
+    Parse a plain text bug report that starts with 🐛.
+
+    Expected format:
+    🐛 Title
+
+    **Steps to reproduce:**
+    1. Step one
+    2. Step two
+
+    **Expected:** Expected behavior
+    **Actual:** Actual behavior
+
+    **Category:** category
+    **Severity:** severity
+    """
+    if not content.startswith("🐛"):
+        return None
+
+    lines = content.split("\n")
+    title = lines[0].replace("🐛", "").strip()
+
+    # Extract sections
+    full_text = content
+
+    # Parse steps
+    steps = []
+    steps_match = re.search(
+        r"\*\*Steps to reproduce:\*\*\s*(.*?)(?=\*\*Expected|\*\*Category|$)",
+        full_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if steps_match:
+        steps = parse_steps(steps_match.group(1))
+
+    # Parse expected/actual
+    expected_match = re.search(r"\*\*Expected:\*\*\s*(.+?)(?=\*\*|$)", full_text, re.IGNORECASE)
+    expected = expected_match.group(1).strip() if expected_match else None
+
+    actual_match = re.search(r"\*\*Actual:\*\*\s*(.+?)(?=\*\*|$)", full_text, re.IGNORECASE)
+    actual = actual_match.group(1).strip() if actual_match else None
+
+    # Parse category/severity
+    category_match = re.search(r"\*\*Category:\*\*\s*(\w+)", full_text, re.IGNORECASE)
+    category = category_match.group(1).lower() if category_match else "bug"
+
+    severity_match = re.search(r"\*\*Severity:\*\*\s*(\w+)", full_text, re.IGNORECASE)
+    severity = severity_match.group(1).lower() if severity_match else "medium"
+
+    # Build description from the full text minus the title
+    description = "\n".join(lines[1:]).strip()
+
+    return Issue(
+        title=title,
+        description=description,
+        severity=severity,
+        category=category,
+        reporter="Discord",
+        steps_to_reproduce=steps,
+        expected=expected,
+        actual=actual,
+        timestamp=datetime.now(),
+    )

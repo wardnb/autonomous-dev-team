@@ -70,6 +70,15 @@ class CodeWorker(BaseWorker):
             if new_content != content:
                 return await self.write_file(file, new_content)
 
+        # Strategy 2.5: Case-insensitive match (common issue with button text)
+        case_match = self._find_case_insensitive_match(content, old_code, new_code)
+        if case_match:
+            actual_old, adjusted_new = case_match
+            self.log(f"Found case-insensitive match: '{actual_old[:50]}...'")
+            new_content = content.replace(actual_old, adjusted_new, 1)
+            if new_content != content:
+                return await self.write_file(file, new_content)
+
         # Strategy 3: Fuzzy match using difflib SequenceMatcher
         fuzzy_match = self._find_fuzzy_match(content, old_code, threshold=0.85)
         if fuzzy_match:
@@ -103,6 +112,81 @@ class CodeWorker(BaseWorker):
                     return candidate
 
         return None
+
+    def _find_case_insensitive_match(
+        self, content: str, old_code: str, new_code: str
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Find code using case-insensitive matching.
+
+        This handles common issues where Claude gets the case wrong
+        (e.g., "Sign In" vs "Sign in").
+
+        Returns (actual_old_code_from_file, adjusted_new_code) or None.
+        """
+        old_lower = old_code.lower()
+        lines = content.split("\n")
+
+        # Try to find a line that matches case-insensitively
+        for i, line in enumerate(lines):
+            if old_lower in line.lower():
+                # Found a case-insensitive match in this line
+                # Now find the exact position and extract the actual text
+                line_lower = line.lower()
+                pos = line_lower.find(old_lower)
+                actual_old = line[pos : pos + len(old_code)]
+
+                # Adjust new_code to preserve the original case pattern where possible
+                # If old had "Sign in" but Claude sent "Sign In", adjust new_code too
+                if actual_old != old_code:
+                    # Apply the same case transformation to new_code
+                    adjusted_new = self._apply_case_pattern(old_code, actual_old, new_code)
+                else:
+                    adjusted_new = new_code
+
+                # Verify uniqueness
+                if content.lower().count(old_lower) == 1:
+                    return (actual_old, adjusted_new)
+
+        return None
+
+    def _apply_case_pattern(self, expected: str, actual: str, new_text: str) -> str:
+        """
+        Apply case pattern from actual to new_text.
+
+        If expected was "Sign In" but actual was "Sign in",
+        transform new_text accordingly.
+        """
+        # Find the differences and apply them
+        result = list(new_text)
+
+        for i, (exp_char, act_char) in enumerate(zip(expected, actual)):
+            if exp_char.lower() == act_char.lower() and exp_char != act_char:
+                # Case difference found - find this char in new_text and adjust
+                # This is simplified - in practice we'd need smarter matching
+                pass
+
+        # Simplified approach: if there's a simple pattern like "Sign In" -> "Sign in"
+        # just do a case-insensitive replace
+        if expected.lower() in new_text.lower():
+            # Find where the expected text appears in new_text
+            start = new_text.lower().find(expected.lower())
+            if start >= 0:
+                # Preserve the actual case pattern
+                old_in_new = new_text[start : start + len(expected)]
+                # Apply actual's case to the matching portion
+                adjusted = ""
+                for i, (n_char, a_char) in enumerate(
+                    zip(old_in_new, actual + " " * (len(old_in_new) - len(actual)))
+                ):
+                    if i < len(actual) and n_char.lower() == a_char.lower():
+                        adjusted += a_char
+                    else:
+                        adjusted += n_char
+                result = new_text[:start] + adjusted + new_text[start + len(expected) :]
+                return result
+
+        return new_text
 
     def _find_fuzzy_match(
         self, content: str, target: str, threshold: float = 0.85

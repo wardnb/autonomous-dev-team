@@ -803,15 +803,24 @@ LESSONS FROM PAST FAILURES (avoid these mistakes):
             except Exception as e:
                 logger.warning(f"Failed to get lessons: {e}")
 
-        prompt = f"""Based on this analysis, create a detailed fix strategy:
+        # Add line numbers to code for easier reference
+        def add_line_numbers(content: str) -> str:
+            lines = content.split('\n')
+            return '\n'.join(f'{i+1:4d}| {line}' for i, line in enumerate(lines))
+
+        code_with_lines = {f: add_line_numbers(c) for f, c in code_contents.items()}
+
+        prompt = f"""Based on this analysis, create a detailed fix strategy.
+
+IMPORTANT: The file contents below are AUTHORITATIVE. Your old_code values MUST be copied EXACTLY from these contents.
 
 **Issue:** {issue.title}
 **Root Cause:** {analysis.get('root_cause', 'Unknown')}
 **Complexity:** {analysis.get('complexity', 'moderate')}
 **Approach:** {analysis.get('approach', 'Unknown')}
 
-**Affected Files:**
-{chr(10).join(f'### {f}{chr(10)}```{"html" if f.endswith(".html") else "python"}{chr(10)}{c}{chr(10)}```' for f, c in code_contents.items())}
+**Affected Files (with line numbers for reference):**
+{chr(10).join(f'### {f}{chr(10)}```{"html" if f.endswith(".html") else "python"}{chr(10)}{c}{chr(10)}```' for f, c in code_with_lines.items())}
 
 Generate a step-by-step fix plan. Include:
 1. Specific code changes needed (with line references if possible)
@@ -879,12 +888,20 @@ FRAMEWORK-SPECIFIC NOTES:
 - Jinja2: Templates auto-escape by default, so {{ variable }} is already safe. Only use |safe filter for trusted HTML
 - For XSS protection, prefer template escaping over manual escaping in Python code
 
-HTML TEMPLATE EDITING RULES (CRITICAL):
-- old_code MUST be copied EXACTLY from the file content shown above - character for character
-- Include complete HTML tags and surrounding whitespace exactly as shown
-- For form edits: include the opening <form> tag line and at least the first line inside it
-- Example for CSRF: old_code should be the exact <form> line including attributes
-- Test that your old_code string appears exactly once in the file content above before using it{lessons_section}"""
+HTML/TEMPLATE EDITING RULES (CRITICAL - READ CAREFULLY):
+1. ALWAYS use the EXACT text from the "Affected Files" section above - copy-paste, don't type from memory
+2. old_code must be a VERBATIM copy - every character, space, quote, AND CASE must match exactly
+3. CASE SENSITIVITY IS CRITICAL: "Sign In" != "Sign in" != "sign in" - check the actual file!
+4. For button text changes: include the full <button> tag on a single line
+5. For placeholder changes: include the full <input> tag on a single line
+6. Use \\n to join multiple lines into a single JSON string
+7. VERIFY: Search the file content above for your old_code - if it doesn't appear exactly once, your edit will FAIL
+
+EXAMPLE - to change button text:
+- Find the EXACT line in the file content above using the line numbers provided
+- If file shows: `167| <button...>Sign in with Passkey</button>` (lowercase "in")
+- old_code must use lowercase: "Sign in with Passkey" NOT "Sign In with Passkey"
+- Note: Escape quotes with \\" in JSON strings{lessons_section}"""
 
         response = await self._query_claude(prompt, session, max_tokens=6000)
         if not response:
