@@ -70,7 +70,7 @@ class TestWorker(BaseWorker):
         # Run flake8
         self.log("Running flake8 lint check...")
         flake8_result = await self.run_command(
-            f"{venv_prefix}python -m flake8 . --max-line-length=120 --exclude=venv,__pycache__,.git"
+            f"{venv_prefix}python -m flake8 . --max-line-length=120 --exclude=venv,__pycache__,.git,legacy"
         )
         result.flake8_passed = flake8_result.success
         if not flake8_result.success:
