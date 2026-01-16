@@ -1184,6 +1184,28 @@ EXAMPLE - to change button text that appears multiple times:
         if "login" in issue.title.lower():
             key_files.extend(["templates/login.html"])
 
+        # For UI/UX issues, include base template which contains page titles, headers, etc.
+        issue_text = f"{issue.title} {issue.description}".lower()
+        if issue.category == "ux" or any(
+            keyword in issue_text
+            for keyword in ["title", "header", "footer", "nav", "style", "css", "layout"]
+        ):
+            key_files.extend(["templates/base.html"])
+
+        # For text/content changes, try to find templates with that text
+        # by including common template files
+        if any(
+            keyword in issue_text
+            for keyword in ["text", "label", "button", "name", "display", "show"]
+        ):
+            # Include base template and common templates
+            key_files.extend(
+                [
+                    "templates/base.html",
+                    "templates/index.html",
+                ]
+            )
+
         # Combine with extracted references
         all_files = list(set(key_files + file_refs))[:10]
 

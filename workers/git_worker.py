@@ -132,7 +132,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
         # Commit
         # Use a temp file for the message to handle special characters
         msg_file = self.codebase_path / ".git" / "COMMIT_MSG"
-        msg_file.write_text(full_message)
+        msg_file.write_text(full_message, encoding="utf-8")
 
         result = await self.run_command(f'git commit -F "{msg_file}"')
 
@@ -160,7 +160,9 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
         issue = self.session.issue
 
-        title = f"fix: {issue.title}"
+        # Sanitize title for shell command - remove quotes and escape special chars
+        clean_title = issue.title.replace('"', "'").replace("\\", "")
+        title = f"fix: {clean_title}"
 
         body = f"""## Summary
 
@@ -194,7 +196,7 @@ Automated by Mastermind Agent
 
         # Write body to temp file to handle special characters
         body_file = self.codebase_path / ".git" / "PR_BODY"
-        body_file.write_text(body)
+        body_file.write_text(body, encoding="utf-8")
 
         result = await self.run_command(
             f'gh pr create --title "{title}" --body-file "{body_file}" '
